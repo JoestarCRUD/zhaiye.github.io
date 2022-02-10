@@ -1,0 +1,74 @@
+<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>高级请求应答模式 | 骡的岛技术小站</title><script src="https://cdn.bootcss.com/valine/1.4.4/Valine.min.js"></script><link rel="stylesheet" href="/css/arknights.css"><link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/highlight.js/10.1.2/styles/atom-one-dark-reasonable.min.css"><style>@font-face {
+ font-family: BenderLight;
+ src: local('Bender'), url("/font/BenderLight.ttf");
+}
+@font-face {
+ font-family: 'JetBrains Mono';
+ src: local('JetBrains Mono'), url('/font/JetBrainsMono-Regular.woff2') format('woff2');
+}</style><meta name="generator" content="Hexo 5.4.0"></head><body><header><nav><a href="/">Home</a><a href="/archives/">Archives</a></nav></header><main><article><div id="post-bg"><div id="post-title"><div id="post-info"><span>date:<time datetime="2022-01-16T00:52:51.000Z" id="date"> 2022-01-16</time></span><br><span>updated:<time datetime="2022-01-16T02:08:56.771Z" id="updated"> 2022-01-16</time></span></div><h1>高级请求应答模式</h1><hr></div><div id="post-content"><h1 id="Chapter-3-Advanced-Request-Reply-Patterns"><a href="#Chapter-3-Advanced-Request-Reply-Patterns" class="headerlink" title="Chapter 3 Advanced Request-Reply Patterns"></a>Chapter 3 Advanced Request-Reply Patterns</h1><p>在 Chapter 2 - Sockets and Patterns 中，我们通过开发一系列小型应用程序来学习使用 ZeroMQ 的基础知识，每次都探索 ZeroMQ 的新方面。 我们将在本章中继续这种方法，因为我们将探索构建在 ZeroMQ 核心请求-回复模式之上的高级模式。</p>
+<p>我们将介绍：</p>
+<p>请求-回复机制如何工作<br>如何组合 REQ、REP、DEALER 和 ROUTER 套接字<br>ROUTER 套接字如何工作，详细<br>负载均衡模式<br>构建一个简单的负载均衡消息代理<br>为 ZeroMQ 设计高级 API<br>构建异步请求-应答服务器<br>详细的代理间路由示例</p>
+<h2 id="请求-回复机制"><a href="#请求-回复机制" class="headerlink" title="请求-回复机制"></a>请求-回复机制</h2><p>我们已经简要介绍了multipart 消息。 现在让我们看一个主要用例，即<em>回复消息信封</em>。 信封是一种使用地址安全地打包数据的方法，无需接触数据本身。 通过将回复地址分隔到一个信封中，我们可以编写通用的中介，例如创建、读取和删除地址的 API 和代理，无论消息负载或结构是什么。</p>
+<p>在请求-回复模式中，信封保存回复的返回地址。 这就是没有状态的 ZeroMQ 网络如何创建往返请求-回复对话框。</p>
+<p>当您使用 REQ 和 REP 套接字时，您甚至看不到信封； 这些套接字会自动处理它们。 但是对于大多数有趣的请求-回复模式，您需要了解信封，尤其是 ROUTER 套接字。 我们将逐步完成此操作。</p>
+<h3 id="简单的回复信封"><a href="#简单的回复信封" class="headerlink" title="简单的回复信封"></a>简单的回复信封</h3><p>请求-回复交换由请求消息和最终回复消息组成。 在简单的请求-回复模式中，每个请求都有一个回复。 在更高级的模式中，请求和回复可以异步流动。 但是，回复信封始终以相同的方式工作。</p>
+<p>ZeroMQ 回复信封正式由零个或多个回复地址组成，后跟一个空帧（信封分隔符），然后是消息正文（零个或多个帧）。 信封由多个在链中协同工作的套接字创建。 我们将对此进行分解。</p>
+<p>我们将从通过 REQ 套接字发送“Hello”开始。 REQ 套接字创建了最简单的回复信封，它没有地址，只有一个空分隔符帧和包含“Hello”字符串的消息帧。 这是一个两帧消息。</p>
+<p><strong>Figure 26 - Request with Minimal Envelope</strong></p>
+<img src="/2022/01/16/%E9%AB%98%E7%BA%A7%E8%AF%B7%E6%B1%82%E5%BA%94%E7%AD%94%E6%A8%A1%E5%BC%8F/fig26.png" class="" title="Figure 26">
+
+<p>REP 套接字执行匹配工作：它给信封解包，直到并包括分隔符帧，保存整个信封，并将“Hello”字符串传递给应用程序。 因此，我们最初的 Hello World 示例在内部使用了请求-回复信封，但应用程序从未见过它们。</p>
+<p>如果你监视 hwclient 和 hwserver 之间的网络数据流动，你会看到：每个请求和每个回复实际上都是两个帧，一个空帧，然后是正文。 对于一个简单的 REQ-REP 对话框来说似乎没有多大意义。 但是，当我们探索 ROUTER 和 DEALER 如何处理信封时，您会看到原因。</p>
+<h3 id="扩展后的回复信封"><a href="#扩展后的回复信封" class="headerlink" title="扩展后的回复信封"></a>扩展后的回复信封</h3><p>现在让我们用中间的 ROUTER-DEALER 代理扩展 REQ-REP 对，看看这对回复信封有何影响。 这是我们在Chapter 2 - Sockets and Patterns 中已经看到的<em>扩展请求 - 回复模式</em>。 事实上，我们可以插入任意数量的代理步骤。机制是一样的。</p>
+<p><strong>Figure 27 - Extended Request-Reply Pattern</strong></p>
+<img src="/2022/01/16/%E9%AB%98%E7%BA%A7%E8%AF%B7%E6%B1%82%E5%BA%94%E7%AD%94%E6%A8%A1%E5%BC%8F/fig27.png" class="" title="Figure 27">
+
+<p>proxy以伪代码执行此操作：</p>
+<figure class="highlight python"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><code class="hljs python">prepare context, frontend <span class="hljs-keyword">and</span> backend sockets<br><span class="hljs-keyword">while</span> true:<br>    poll on both sockets<br>    <span class="hljs-keyword">if</span> frontend had <span class="hljs-built_in">input</span>:<br>        read <span class="hljs-built_in">all</span> frames <span class="hljs-keyword">from</span> frontend<br>        send to backend<br>    <span class="hljs-keyword">if</span> backend had <span class="hljs-built_in">input</span>:<br>        read <span class="hljs-built_in">all</span> frames <span class="hljs-keyword">from</span> backend<br>        send to frontend<br></code></pre></td></tr></table></figure>
+<p>ROUTER 套接字与其他套接字不同，它跟踪它拥有的每个连接，并告诉调用者这些连接。 它告诉调用者的方式是将<em>连接标识</em>粘贴在收到的每条消息的前面。 标识，有时称为<em>地址</em>，只是一个二进制字符串，除了“这是连接的唯一句柄”之外没有任何意义。 然后，当您通过 ROUTER 套接字发送消息时，您首先发送一个标识帧。</p>
+<p>zmq_socket() 手册页是这样描述的：</p>
+<blockquote>
+<p>接收消息时，ZMQ_ROUTER 套接字应在将消息传递给应用程序之前将包含原始对等方标识的消息部分添加到消息中。 收到的消息在所有连接的对等点之间公平排队。 当发送消息时，ZMQ_ROUTER 套接字应删除消息的第一部分并使用它来确定消息应路由到的对等方的标识。</p>
+</blockquote>
+<p>作为历史记录，ZeroMQ v2.2 及更早版本使用 UUID 作为身份。 ZeroMQ v3.0 及更高版本默认生成一个 5 字节的标识（0 + 一个随机的 32 位整数）。 对网络性能有一些影响，但仅限于使用多个代理跃点时，这种情况很少见。 大多数更改是通过删除对 UUID 库的依赖来简化构建 libzmq。</p>
+<p>身份是一个难以理解的概念，但如果你想成为 ZeroMQ 专家，它是必不可少的。 ROUTER 套接字为它工作的每个连接发明了一个随机标识。 如果有三个 REQ 套接字连接到一个 ROUTER 套接字，它将创造三个随机身份，每个 REQ 套接字一个。</p>
+<p>因此，如果我们继续我们的工作示例，假设 REQ 套接字有一个 3 字节的标识 ABC。 在内部，这意味着 ROUTER 套接字保留一个哈希表，它可以在其中搜索 ABC 并找到 REQ 套接字的 TCP 连接。</p>
+<p>当我们从 ROUTER 套接字接收到消息时，我们得到三帧。</p>
+<p><strong>Figure 28 - Request with One Address</strong></p>
+<img src="/2022/01/16/%E9%AB%98%E7%BA%A7%E8%AF%B7%E6%B1%82%E5%BA%94%E7%AD%94%E6%A8%A1%E5%BC%8F/fig28.png" class="" title="Figure 28">
+
+<p>代理循环的核心是“从一个套接字读取，写入另一个”，所以我们从字面上将这三个帧发送到 DEALER 套接字上。 如果您现在嗅探网络流量，您会看到这三个帧从 DEALER 套接字飞到 REP 套接字。 REP 套接字和以前一样，剥离了包括新回复地址在内的整个信封，并再次将“Hello”传递给调用者。</p>
+<p>顺便说一句，REP 套接字一次只能处理一个请求-回复交换，这就是为什么如果您尝试读取多个请求或发送多个回复而不遵守严格的接收-发送周期，则会出错。</p>
+<p>您现在应该能够可视化返回路径。 当 hwserver 发回“World”时，REP 套接字用它保存的信封包装它，并通过线路将三帧回复消息发送到 DEALER 套接字。</p>
+<p><strong>Figure 29 - Reply with one Address</strong></p>
+<img src="/2022/01/16/%E9%AB%98%E7%BA%A7%E8%AF%B7%E6%B1%82%E5%BA%94%E7%AD%94%E6%A8%A1%E5%BC%8F/fig29.png" class="" title="Figure 29">
+
+<p>现在 DEALER 读取这三个帧，并通过 ROUTER 套接字将所有三个帧发送出去。 ROUTER 获取消息的第一帧，即 ABC 标识，并为此查找连接。 如果它发现了，然后将接下来的两帧泵出到网络线路上。</p>
+<p><strong>Figure 30 - Reply with Minimal Envelope</strong></p>
+<img src="/2022/01/16/%E9%AB%98%E7%BA%A7%E8%AF%B7%E6%B1%82%E5%BA%94%E7%AD%94%E6%A8%A1%E5%BC%8F/fig30.png" class="" title="Figure 30">
+
+<p>REQ 套接字拾取此消息，并检查第一帧是否为空分隔符，确实如此。 REQ 套接字丢弃该帧并将“World”传递给调用应用程序，该应用程序将其打印出来，让我们第一次看到 ZeroMQ 的初学者感到惊讶。</p>
+<h3 id="这有什么好处？"><a href="#这有什么好处？" class="headerlink" title="这有什么好处？"></a>这有什么好处？</h3><p>老实说，严格请求-回复或扩展请求-回复的用例有些有限。一方面，没有简单的方法可以从常见故障中恢复，例如由于应用程序代码错误导致服务器崩溃。我们将在Chapter 4 - Reliable Request-Reply Patterns中看到更多相关内容。然而，一旦你掌握了这四个套接字处理信封的方式，以及它们如何相互通信，你就可以做一些非常有用的事情。我们看到了 ROUTER 如何使用回复信封来决定将回复路由回哪个客户端 REQ 套接字。现在让我们用另一种方式表达：</p>
+<ul>
+<li>每次 ROUTER 给你一条消息时，它都会告诉你来自哪个对等点，作为一个标识。</li>
+<li>您可以配合哈希表（以标识作为键）一起使用，以便在新对等点到达时对其进行跟踪。</li>
+<li>如果您将标识作为消息的第一帧的前缀，ROUTER 将异步地将消息路由到与其连接的任何对等方。</li>
+</ul>
+<p>ROUTER 套接字不关心整个信封。他们对空分隔符一无所知。他们所关心的只是一个身份框架，可以让他们确定将消息发送到哪个连接。</p>
+<h3 id="请求-回复套接字回顾"><a href="#请求-回复套接字回顾" class="headerlink" title="请求-回复套接字回顾"></a>请求-回复套接字回顾</h3><p>让我们回顾一下：</p>
+<ul>
+<li><p>REQ 套接字向网络发送消息数据前面的空分隔符帧。 REQ 套接字是同步的。 REQ 套接字总是发送一个请求，然后等待一个回复。 REQ 套接字一次与一个对等方通信。如果您将一个 REQ 套接字连接到多个对等点，请求将被分发给每个对等点，并一次一圈地从每个对等点得到回复。</p>
+</li>
+<li><p>REP 套接字读取并保存所有标识帧（包括空分隔符），然后将下一帧或多个帧传递给调用者。 REP 套接字是同步的，一次只与一个对等方通信。如果你将一个 REP 套接字连接到多个对等点，请求会以公平的方式从对等点读取，并且回复总是发送到发出最后一个请求的同一个对等点。</p>
+</li>
+<li><p>DEALER 套接字忽略了回复信封，并像处理任何多部分消息一样处理它。 DEALER 套接字是异步的，类似于 PUSH 和 PULL 的组合。它们在所有连接之间分配发送的消息，并公平队列从所有连接接收消息。</p>
+</li>
+<li><p>ROUTER 套接字忽略了回复信封，如 DEALER。它为其连接创建身份，并将这些身份作为任何接收到的消息中的第一帧传递给调用者。相反，当调用者发送消息时，它使用第一个消息帧作为标识来查找要发送到的连接。路由器是异步的。</p>
+</li>
+</ul>
+<div id="paginator"></div></div><div id="post-footer"><hr><a href="/2022/01/16/%E5%A5%97%E6%8E%A5%E5%AD%97%E4%B8%8E%E6%A8%A1%E5%BC%8F/">ZMQ(3.2)官网文档翻译 第二章——套接字与模式 Next →</a><hr></div><div id="bottom-btn"><a id="to-index" href="#post-index" title="index">≡</a><a id="to-top" href="#post-title" title="to top">∧</a></div><details id="reward"><summary>打赏</summary><div id="alipay"><span>支付宝 | Alipay</span><br><img src="/img/Alipay.png"></div><div id="wechat"><span>微信 | WeChat</span><br><img src="/img/WeChat.png"></div></details><div id="Valine"></div><script>new Valine({
+ el: '#Valine'
+ , appId: ''
+ , appKey: ''
+ , placeholder: '此条评论委托企鹅物流发送'
+})</script></div></article><aside><div id="about"><a href="/" id="logo"><img src="https://ak.hypergryph.com/assets/index/images/ak/pc/faction/1.png" alt="Logo"></a><h1 id="Dr"><a href="/"> Dr.ZhaiYe</a></h1><section id="total"><a id="total-archives" href="/archives"><span class="total-title">Archives Total:</span><span class="total-number">8</span></a><div id="total-tags"><span class="total-title">Tags:</span><span class="total-number">10</span></div><div id="total-categories"><span class="total-title">Categories:</span><span class="total-number">6</span></div></section></div><div id="aside-block"><h1>INDEX</h1><div id="post-index"><ol class="toc"><li class="toc-item toc-level-1"><a class="toc-link" href="#Chapter-3-Advanced-Request-Reply-Patterns"><span class="toc-number">1.</span> <span class="toc-text">Chapter 3 Advanced Request-Reply Patterns</span></a><ol class="toc-child"><li class="toc-item toc-level-2"><a class="toc-link" href="#%E8%AF%B7%E6%B1%82-%E5%9B%9E%E5%A4%8D%E6%9C%BA%E5%88%B6"><span class="toc-number">1.1.</span> <span class="toc-text">请求-回复机制</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#%E7%AE%80%E5%8D%95%E7%9A%84%E5%9B%9E%E5%A4%8D%E4%BF%A1%E5%B0%81"><span class="toc-number">1.1.1.</span> <span class="toc-text">简单的回复信封</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%89%A9%E5%B1%95%E5%90%8E%E7%9A%84%E5%9B%9E%E5%A4%8D%E4%BF%A1%E5%B0%81"><span class="toc-number">1.1.2.</span> <span class="toc-text">扩展后的回复信封</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E8%BF%99%E6%9C%89%E4%BB%80%E4%B9%88%E5%A5%BD%E5%A4%84%EF%BC%9F"><span class="toc-number">1.1.3.</span> <span class="toc-text">这有什么好处？</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E8%AF%B7%E6%B1%82-%E5%9B%9E%E5%A4%8D%E5%A5%97%E6%8E%A5%E5%AD%97%E5%9B%9E%E9%A1%BE"><span class="toc-number">1.1.4.</span> <span class="toc-text">请求-回复套接字回顾</span></a></li></ol></li></ol></li></ol></div></div><footer><nobr><span class="text-title">©</span><span class="text-content">2021 Guihub, Inc.</span></nobr><wbr><nobr><span class="text-title">License</span><span class="text-content">MIT License</span></nobr><wbr><wbr><nobr>published with&nbsp;<a target="_blank" rel="noopener" href="http://hexo.io">Hexo&nbsp;</a></nobr><wbr><nobr>Theme&nbsp;<a target="_blank" rel="noopener" href="https://github.com/Yue-plus/hexo-theme-arknights">Arknight&nbsp;</a></nobr><wbr><nobr>by&nbsp;<a target="_blank" rel="noopener" href="https://github.com/Yue-plus">ZhaiYe</a></nobr></footer></aside></main><canvas id="canvas-dust"></canvas><script src="/js/arknights.js"></script><script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/10.1.2/highlight.min.js"></script></body></html>
